@@ -13,6 +13,7 @@ Configuration via .env file or environment variables (see env.example).
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import re
@@ -666,4 +667,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    lock_path = Path(__file__).resolve().parent / ".sync.lock"
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another sync is already running, skipping.", file=sys.stderr)
+        raise SystemExit(0)
+    try:
+        main()
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
