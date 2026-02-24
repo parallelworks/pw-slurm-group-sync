@@ -281,11 +281,10 @@ def run_sacctmgr(
 
 
 def slurm_list_accounts(config: Config) -> list[SlurmAccount]:
-    """List current Slurm accounts for the cluster."""
+    """List current Slurm accounts (accounts are global, not per-cluster)."""
     result = run_sacctmgr(
         ["list", "account", "-n", "-P",
-         "format=Account,Description,Organization",
-         "where", f"cluster={config.slurm_cluster}"],
+         "format=Account,Description,Organization"],
         config,
     )
     accounts = []
