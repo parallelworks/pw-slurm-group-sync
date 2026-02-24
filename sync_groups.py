@@ -345,15 +345,11 @@ def slurm_add_account(config: Config, name: str, description: str) -> None:
 
 def slurm_remove_account(config: Config, name: str) -> None:
     logger.info("Removing Slurm account: %s", name)
-    result = run_sacctmgr(
+    run_sacctmgr(
         ["-i", "remove", "account",
-         "where", f"name={name}",
-         f"cluster={config.slurm_cluster}"],
+         "where", f"name={name}"],
         config,
-        check=False,
     )
-    if result.returncode != 0 and "Nothing deleted" not in result.stdout:
-        raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
 def slurm_add_user(config: Config, username: str, account: str, default_account: str | None = None) -> None:
