@@ -105,6 +105,7 @@ class ActivateGroup:
     description: str
     members: list[str]  # usernames
     allocation: int | None  # from allocations.total, e.g. GPU count
+    created_at: str  # ISO timestamp from API, used for DefaultAccount ordering
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,7 @@ def fetch_activate_state(config: Config) -> list[ActivateGroup]:
             description=sanitize_description(g.get("description", g["name"])),
             members=members,
             allocation=allocation,
+            created_at=g.get("createdAt", ""),
         ))
 
     total_members = sum(len(g.members) for g in groups)
@@ -408,17 +410,24 @@ def compute_desired_state(
     desired_associations: dict[str, set[str]] = {}
     desired_allocations: dict[str, int] = {}
 
+    # Map account name → created_at for DefaultAccount ordering
+    account_created_at: dict[str, str] = {}
+
     for group in groups:
         desired_accounts[group.name] = group.description
+        account_created_at[group.name] = group.created_at
         if group.allocation is not None:
             desired_allocations[group.name] = group.allocation
         for username in group.members:
             desired_associations.setdefault(username, set()).add(group.name)
 
-    # DefaultAccount = first group name alphabetically
+    # DefaultAccount = earliest-created group (falls back to alphabetical if no timestamps)
     desired_defaults: dict[str, str] = {}
     for username, accounts in desired_associations.items():
-        desired_defaults[username] = sorted(accounts)[0]
+        desired_defaults[username] = sorted(
+            accounts,
+            key=lambda a: (account_created_at.get(a, ""), a),
+        )[0]
 
     return desired_accounts, desired_associations, desired_defaults, desired_allocations
 
