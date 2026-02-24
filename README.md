@@ -142,6 +142,8 @@ All configuration is via `.env` file or environment variables. See [env.example]
 | `SLURM_CLUSTER` | No | `ACTIVATE_ORG_NAME` | Slurm ClusterName |
 | `SLURM_ACCOUNT_ORG` | No | `ACTIVATE_ORG_NAME` | Organization field on Slurm accounts |
 | `SYNC_GROUPS` | No | (all) | Comma-separated group names to sync |
+| `SYNC_ALLOCATIONS` | No | `false` | Sync ACTIVATE allocations to Slurm `GrpTRES` |
+| `SLURM_ALLOCATION_TRES` | No | `gres/gpu` | TRES type for allocation limits |
 | `DRY_RUN` | No | `false` | Log changes without executing |
 | `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 

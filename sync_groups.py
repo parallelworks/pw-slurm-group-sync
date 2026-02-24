@@ -43,6 +43,8 @@ class Config:
     slurm_cluster: str
     slurm_account_org: str
     sync_groups: list[str]
+    sync_allocations: bool
+    slurm_allocation_tres: str
     dry_run: bool
     log_level: str
 
@@ -74,6 +76,8 @@ def load_config() -> Config:
         slurm_cluster=os.environ.get("SLURM_CLUSTER", org_name),
         slurm_account_org=os.environ.get("SLURM_ACCOUNT_ORG", org_name),
         sync_groups=sync_groups,
+        sync_allocations=os.environ.get("SYNC_ALLOCATIONS", "false").lower() in ("true", "1", "yes"),
+        slurm_allocation_tres=os.environ.get("SLURM_ALLOCATION_TRES", "gres/gpu"),
         dry_run=os.environ.get("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     )
@@ -100,6 +104,7 @@ class ActivateGroup:
     name: str
     description: str
     members: list[str]  # usernames
+    allocation: int | None  # from allocations.total, e.g. GPU count
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,7 @@ class SyncPlan:
     associations_to_add: list[tuple[str, str, str | None]] = field(default_factory=list)  # (user, acct, default)
     associations_to_remove: list[tuple[str, str]] = field(default_factory=list)  # (user, acct)
     defaults_to_update: list[tuple[str, str]] = field(default_factory=list)    # (user, new_default)
+    allocations_to_set: list[tuple[str, int]] = field(default_factory=list)    # (account, allocation_value)
 
     def is_empty(self) -> bool:
         return not any([
@@ -132,6 +138,7 @@ class SyncPlan:
             self.associations_to_add,
             self.associations_to_remove,
             self.defaults_to_update,
+            self.allocations_to_set,
         ])
 
 
@@ -217,12 +224,14 @@ def fetch_activate_state(config: Config) -> list[ActivateGroup]:
     for g in raw_groups:
         members = activate_get_group_members(config, g["id"])
         account_name = normalize_account_name(g["name"])
-        logger.debug("Group %s (%s): %d members", g["name"], account_name, len(members))
+        allocation = g.get("allocations", {}).get("total", None)
+        logger.debug("Group %s (%s): %d members, allocation=%s", g["name"], account_name, len(members), allocation)
         groups.append(ActivateGroup(
             id=g["id"],
             name=account_name,
             description=sanitize_description(g.get("description", g["name"])),
             members=members,
+            allocation=allocation,
         ))
 
     total_members = sum(len(g.members) for g in groups)
@@ -358,6 +367,17 @@ def slurm_remove_user_association(config: Config, username: str, account: str) -
     )
 
 
+def slurm_set_account_allocation(config: Config, account: str, tres: str, value: int) -> None:
+    logger.info("Setting allocation for %s: GrpTRES=%s=%d", account, tres, value)
+    run_sacctmgr(
+        ["-i", "modify", "account",
+         "where", f"name={account}",
+         f"cluster={config.slurm_cluster}",
+         "set", f"GrpTRES={tres}={value}"],
+        config,
+    )
+
+
 def slurm_modify_default_account(config: Config, username: str, new_default: str) -> None:
     logger.info("Updating DefaultAccount for %s -> %s", username, new_default)
     run_sacctmgr(
@@ -375,19 +395,23 @@ def slurm_modify_default_account(config: Config, username: str, new_default: str
 
 def compute_desired_state(
     groups: list[ActivateGroup],
-) -> tuple[dict[str, str], dict[str, set[str]], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, set[str]], dict[str, str], dict[str, int]]:
     """Derive desired Slurm state from ACTIVATE groups.
 
     Returns:
         desired_accounts: {account_name: description}
         desired_associations: {username: set of account_names}
         desired_defaults: {username: default_account_name}
+        desired_allocations: {account_name: allocation_value}
     """
     desired_accounts: dict[str, str] = {}
     desired_associations: dict[str, set[str]] = {}
+    desired_allocations: dict[str, int] = {}
 
     for group in groups:
         desired_accounts[group.name] = group.description
+        if group.allocation is not None:
+            desired_allocations[group.name] = group.allocation
         for username in group.members:
             desired_associations.setdefault(username, set()).add(group.name)
 
@@ -396,16 +420,18 @@ def compute_desired_state(
     for username, accounts in desired_associations.items():
         desired_defaults[username] = sorted(accounts)[0]
 
-    return desired_accounts, desired_associations, desired_defaults
+    return desired_accounts, desired_associations, desired_defaults, desired_allocations
 
 
 def compute_sync_plan(
     desired_accounts: dict[str, str],
     desired_associations: dict[str, set[str]],
     desired_defaults: dict[str, str],
+    desired_allocations: dict[str, int],
     current_accounts: list[SlurmAccount],
     current_associations: list[SlurmAssociation],
     managed_account_names: set[str],
+    sync_allocations: bool = False,
 ) -> SyncPlan:
     """Diff desired vs current Slurm state. Only operates on managed accounts."""
     plan = SyncPlan()
@@ -453,6 +479,11 @@ def compute_sync_plan(
         if current_default is not None and current_default != desired_default:
             plan.defaults_to_update.append((username, desired_default))
 
+    # --- ALLOCATIONS ---
+    if sync_allocations:
+        for account_name in sorted(desired_allocations.keys()):
+            plan.allocations_to_set.append((account_name, desired_allocations[account_name]))
+
     return plan
 
 
@@ -491,6 +522,11 @@ def log_sync_plan(plan: SyncPlan) -> None:
         for user, new_default in plan.defaults_to_update:
             logger.info("    ~ %s -> DefaultAccount=%s", user, new_default)
 
+    if plan.allocations_to_set:
+        logger.info("  Allocations to set (%d):", len(plan.allocations_to_set))
+        for account, value in plan.allocations_to_set:
+            logger.info("    ~ %s -> GrpTRES=%d", account, value)
+
     logger.info("=================")
 
 
@@ -526,7 +562,14 @@ def execute_sync_plan(plan: SyncPlan, config: Config) -> int:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             errors += 1
 
-    # Phase 5: Remove empty accounts
+    # Phase 5: Set account allocations
+    for account, value in plan.allocations_to_set:
+        try:
+            slurm_set_account_allocation(config, account, config.slurm_allocation_tres, value)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            errors += 1
+
+    # Phase 6: Remove empty accounts
     for name in plan.accounts_to_remove:
         try:
             slurm_remove_account(config, name)
@@ -561,7 +604,13 @@ def main() -> None:
         logger.warning("No groups found (check SYNC_GROUPS filter). Nothing to do.")
         return
 
-    desired_accounts, desired_associations, desired_defaults = compute_desired_state(groups)
+    desired_accounts, desired_associations, desired_defaults, desired_allocations = compute_desired_state(groups)
+
+    if not config.sync_allocations and desired_allocations:
+        logger.info(
+            "Allocations found for %d groups but SYNC_ALLOCATIONS is off (not applying)",
+            len(desired_allocations),
+        )
 
     # Fetch current Slurm state
     try:
@@ -586,9 +635,11 @@ def main() -> None:
         desired_accounts,
         desired_associations,
         desired_defaults,
+        desired_allocations,
         current_accounts,
         current_associations,
         managed,
+        sync_allocations=config.sync_allocations,
     )
     log_sync_plan(plan)
 
