@@ -48,6 +48,7 @@ class Config:
     slurm_allocation_tres: str
     dry_run: bool
     log_level: str
+    heartbeat_url: str
 
 
 def load_config() -> Config:
@@ -81,6 +82,7 @@ def load_config() -> Config:
         slurm_allocation_tres=os.environ.get("SLURM_ALLOCATION_TRES", "gres/gpu"),
         dry_run=os.environ.get("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        heartbeat_url=os.environ.get("HEARTBEAT_URL", ""),
     )
 
 
@@ -594,6 +596,21 @@ def execute_sync_plan(plan: SyncPlan, config: Config) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+
+def ping_heartbeat(config: Config) -> None:
+    """Ping the heartbeat URL to signal successful completion."""
+    if not config.heartbeat_url:
+        return
+    try:
+        resp = requests.get(config.heartbeat_url, timeout=10)
+        logger.debug("Heartbeat ping: %d", resp.status_code)
+    except Exception:
+        logger.warning("Failed to ping heartbeat URL (non-fatal)")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -658,14 +675,16 @@ def main() -> None:
     log_sync_plan(plan)
 
     if plan.is_empty():
+        ping_heartbeat(config)
         return
 
     errors = execute_sync_plan(plan, config)
     if errors:
         logger.error("Sync completed with %d error(s)", errors)
         raise SystemExit(1)
-    else:
-        logger.info("Sync completed successfully")
+
+    logger.info("Sync completed successfully")
+    ping_heartbeat(config)
 
 
 if __name__ == "__main__":
