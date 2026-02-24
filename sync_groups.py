@@ -8,7 +8,7 @@ group filtering for incremental rollout.
 Usage:
     uv run sync_groups.py
 
-Configuration via environment variables (see env.example).
+Configuration via .env file or environment variables (see env.example).
 """
 
 from __future__ import annotations
@@ -19,8 +19,13 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
+
+# Load .env from the script's directory
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger("sync_groups")
 

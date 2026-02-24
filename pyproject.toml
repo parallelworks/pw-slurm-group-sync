@@ -5,4 +5,5 @@ description = "Sync ACTIVATE platform groups to Slurm accounts and associations"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
+    "python-dotenv>=1.0",
 ]

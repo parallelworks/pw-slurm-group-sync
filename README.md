@@ -24,8 +24,8 @@ Each ACTIVATE group becomes a Slurm account. Group members become user associati
 
 2. Copy the example environment file and fill in your values:
    ```bash
-   cp env.example env
-   # Edit env with your ACTIVATE_API_KEY, ACTIVATE_ORG_ID, ACTIVATE_ORG_NAME
+   cp env.example .env
+   # Edit .env with your ACTIVATE_API_KEY, ACTIVATE_ORG_ID, ACTIVATE_ORG_NAME
    ```
 
 3. Install dependencies:
@@ -33,17 +33,22 @@ Each ACTIVATE group becomes a Slurm account. Group members become user associati
    uv sync
    ```
 
+The script automatically loads `.env` from its own directory — no need to `source` it.
+
 ## Testing workflow
 
 Use the gradual rollout approach to validate behavior before syncing all groups.
 
 ### Step 1: Dry-run a single group
 
-Pick one group to test with:
+Set `SYNC_GROUPS` and `DRY_RUN` in your `.env`:
+```
+SYNC_GROUPS=TeamAlpha
+DRY_RUN=true
+```
+
+Then run:
 ```bash
-source env
-export SYNC_GROUPS=DaphneIppolito
-export DRY_RUN=true
 uv run sync_groups.py
 ```
 
@@ -51,22 +56,24 @@ Review the logged sync plan. No changes are made in dry-run mode.
 
 ### Step 2: Apply to that single group
 
+Remove `DRY_RUN` (or set to `false`) in `.env`, keep `SYNC_GROUPS=TeamAlpha`:
 ```bash
-source env
-export SYNC_GROUPS=DaphneIppolito
 uv run sync_groups.py
 ```
 
 Verify the result:
 ```bash
-sacctmgr show account withassoc where cluster=schmidtsciences
+sacctmgr show account withassoc where cluster=mycluster
 ```
 
 ### Step 3: Expand to a few groups
 
+Update `.env`:
+```
+SYNC_GROUPS=TeamAlpha,TeamBeta,TeamGamma
+```
+
 ```bash
-source env
-export SYNC_GROUPS=DaphneIppolito,YejinChoi,NathanWasserman
 uv run sync_groups.py
 ```
 
@@ -79,17 +86,25 @@ Nothing to do, Slurm is already in sync
 
 ### Step 5: Dry-run all groups
 
+Update `.env`:
+```
+DRY_RUN=true
+# SYNC_GROUPS=          (comment out or remove to sync all)
+```
+
 ```bash
-source env
-export DRY_RUN=true
-# Do NOT set SYNC_GROUPS — syncs all
 uv run sync_groups.py
 ```
 
 ### Step 6: Full sync
 
+Update `.env`:
+```
+# DRY_RUN=true          (comment out or set to false)
+# SYNC_GROUPS=          (comment out or remove to sync all)
+```
+
 ```bash
-source env
 uv run sync_groups.py
 ```
 
@@ -98,7 +113,7 @@ uv run sync_groups.py
 Once validated, set up a cron job for continuous sync. Example crontab entry (syncs every 15 minutes):
 
 ```cron
-*/15 * * * * cd /opt/pw-groups && source env && /usr/local/bin/uv run sync_groups.py >> /var/log/pw-groups-sync.log 2>&1
+*/15 * * * * cd /opt/pw-groups && /usr/local/bin/uv run sync_groups.py >> /var/log/pw-groups-sync.log 2>&1
 ```
 
 Adjust the path to `uv` based on your installation. Find it with `which uv`.
@@ -116,7 +131,7 @@ To rotate logs, add a logrotate config at `/etc/logrotate.d/pw-groups`:
 
 ## Configuration reference
 
-All configuration is via environment variables. See [env.example](env.example) for a documented template.
+All configuration is via `.env` file or environment variables. See [env.example](env.example) for a documented template.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -143,7 +158,7 @@ The script only manages Slurm accounts whose `Organization` field matches `SLURM
 
 ## Troubleshooting
 
-**`Missing required environment variables`** — Ensure `ACTIVATE_API_KEY`, `ACTIVATE_ORG_ID`, and `ACTIVATE_ORG_NAME` are set. Source your env file first.
+**`Missing required environment variables`** — Ensure `ACTIVATE_API_KEY`, `ACTIVATE_ORG_ID`, and `ACTIVATE_ORG_NAME` are set in `.env`.
 
 **`API request failed: GET ... -> 401`** — API key is invalid or expired. Generate a new one in ACTIVATE under Account > Authentication > API Keys.
 
