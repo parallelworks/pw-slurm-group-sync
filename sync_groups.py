@@ -302,10 +302,14 @@ def slurm_list_accounts(config: Config) -> list[SlurmAccount]:
 
 
 def slurm_list_associations(config: Config) -> list[SlurmAssociation]:
-    """List current Slurm user associations for the cluster."""
+    """List current Slurm user associations for the cluster.
+
+    Uses 'show user withassoc' instead of 'list associations' because
+    the latter does not populate the DefaultAccount field.
+    """
     result = run_sacctmgr(
-        ["list", "associations", "-n", "-P",
-         "format=User,Account,DefaultAccount,Cluster",
+        ["show", "user", "-n", "-P", "withassoc",
+         "format=User,Account,DefaultAccount",
          "where", f"cluster={config.slurm_cluster}"],
         config,
     )
@@ -314,16 +318,15 @@ def slurm_list_associations(config: Config) -> list[SlurmAssociation]:
         if not line.strip():
             continue
         parts = line.split("|")
-        if len(parts) >= 4:
+        if len(parts) >= 3:
             user = parts[0]
             if not user:
-                # Account-level association row (no user), skip
                 continue
             associations.append(SlurmAssociation(
                 user=user,
                 account=parts[1],
                 default_account=parts[2],
-                cluster=parts[3],
+                cluster=config.slurm_cluster,
             ))
     return associations
 
