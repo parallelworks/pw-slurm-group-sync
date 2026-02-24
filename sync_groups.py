@@ -274,7 +274,7 @@ def slurm_list_accounts(config: Config) -> list[SlurmAccount]:
     result = run_sacctmgr(
         ["list", "account", "-n", "-P",
          "format=Account,Description,Organization",
-         f"where cluster={config.slurm_cluster}"],
+         "where", f"cluster={config.slurm_cluster}"],
         config,
     )
     accounts = []
@@ -296,7 +296,7 @@ def slurm_list_associations(config: Config) -> list[SlurmAssociation]:
     result = run_sacctmgr(
         ["list", "associations", "-n", "-P",
          "format=User,Account,DefaultAccount,Cluster",
-         f"where cluster={config.slurm_cluster}"],
+         "where", f"cluster={config.slurm_cluster}"],
         config,
     )
     associations = []
@@ -323,8 +323,8 @@ def slurm_add_account(config: Config, name: str, description: str) -> None:
     run_sacctmgr(
         ["-i", "add", "account", name,
          f"Cluster={config.slurm_cluster}",
-         f'Description="{sanitize_description(description)}"',
-         f'Organization="{config.slurm_account_org}"'],
+         f"Description={sanitize_description(description)}",
+         f"Organization={config.slurm_account_org}"],
         config,
     )
 
@@ -333,7 +333,7 @@ def slurm_remove_account(config: Config, name: str) -> None:
     logger.info("Removing Slurm account: %s", name)
     run_sacctmgr(
         ["-i", "remove", "account",
-         f"where name={name}",
+         "where", f"name={name}",
          f"cluster={config.slurm_cluster}"],
         config,
     )
@@ -351,7 +351,7 @@ def slurm_remove_user_association(config: Config, username: str, account: str) -
     logger.info("Removing user association: %s -> %s", username, account)
     run_sacctmgr(
         ["-i", "remove", "user",
-         f"where user={username}",
+         "where", f"user={username}",
          f"account={account}",
          f"cluster={config.slurm_cluster}"],
         config,
@@ -362,9 +362,9 @@ def slurm_modify_default_account(config: Config, username: str, new_default: str
     logger.info("Updating DefaultAccount for %s -> %s", username, new_default)
     run_sacctmgr(
         ["-i", "modify", "user",
-         f"where user={username}",
+         "where", f"user={username}",
          f"cluster={config.slurm_cluster}",
-         f"set DefaultAccount={new_default}"],
+         "set", f"DefaultAccount={new_default}"],
         config,
     )
 
