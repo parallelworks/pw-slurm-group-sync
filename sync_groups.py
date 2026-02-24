@@ -345,12 +345,15 @@ def slurm_add_account(config: Config, name: str, description: str) -> None:
 
 def slurm_remove_account(config: Config, name: str) -> None:
     logger.info("Removing Slurm account: %s", name)
-    run_sacctmgr(
+    result = run_sacctmgr(
         ["-i", "remove", "account",
          "where", f"name={name}",
          f"cluster={config.slurm_cluster}"],
         config,
+        check=False,
     )
+    if result.returncode != 0 and "Nothing deleted" not in result.stdout:
+        raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
 def slurm_add_user(config: Config, username: str, account: str, default_account: str | None = None) -> None:
@@ -363,13 +366,16 @@ def slurm_add_user(config: Config, username: str, account: str, default_account:
 
 def slurm_remove_user_association(config: Config, username: str, account: str) -> None:
     logger.info("Removing user association: %s -> %s", username, account)
-    run_sacctmgr(
+    result = run_sacctmgr(
         ["-i", "remove", "user",
          "where", f"user={username}",
          f"account={account}",
          f"cluster={config.slurm_cluster}"],
         config,
+        check=False,
     )
+    if result.returncode != 0 and "Nothing deleted" not in result.stdout:
+        raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
 def slurm_set_account_allocation(config: Config, account: str, tres: str, value: int) -> None:
