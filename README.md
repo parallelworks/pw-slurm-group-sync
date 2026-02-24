@@ -146,6 +146,7 @@ All configuration is via `.env` file or environment variables. See [env.example]
 | `SLURM_ALLOCATION_TRES` | No | `gres/gpu` | TRES type for allocation limits |
 | `DRY_RUN` | No | `false` | Log changes without executing |
 | `LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `HEARTBEAT_URL` | No | — | URL pinged on successful sync (e.g., UptimeRobot heartbeat) |
 
 ## How sync works
 
