@@ -29,6 +29,8 @@ from dotenv import load_dotenv
 # Load .env from the script's directory
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+__version__ = "1.0.0"
+
 logger = logging.getLogger("sync_groups")
 
 
@@ -630,6 +632,8 @@ def ping_heartbeat(config: Config) -> None:
 def main() -> None:
     config = load_config()
     setup_logging(config.log_level)
+
+    logger.info("sync_groups v%s starting", __version__)
 
     if config.dry_run:
         logger.info("=== DRY RUN MODE - no changes will be made ===")
