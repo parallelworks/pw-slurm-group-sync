@@ -640,8 +640,11 @@ def main() -> None:
     # Fetch desired state from ACTIVATE
     try:
         groups = fetch_activate_state(config)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        logger.error("Failed to fetch ACTIVATE state: network error (already retried), aborting")
+        raise SystemExit(1)
     except Exception:
-        logger.exception("Failed to fetch ACTIVATE state, aborting")
+        logger.exception("Failed to fetch ACTIVATE state: unexpected error, aborting")
         raise SystemExit(1)
 
     if not groups:
@@ -660,8 +663,11 @@ def main() -> None:
     try:
         current_accounts = slurm_list_accounts(config)
         current_associations = slurm_list_associations(config)
+    except subprocess.TimeoutExpired:
+        logger.error("Failed to read Slurm state: sacctmgr timed out, aborting")
+        raise SystemExit(1)
     except Exception:
-        logger.exception("Failed to read Slurm state, aborting")
+        logger.exception("Failed to read Slurm state: unexpected error, aborting")
         raise SystemExit(1)
 
     logger.info(
