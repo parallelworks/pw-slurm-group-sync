@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -168,25 +169,37 @@ def normalize_account_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _api_get(config: Config, path: str, params: dict | None = None) -> dict | list:
-    """Shared GET helper with auth."""
+    """Shared GET helper with auth. Retries on transient network errors."""
     url = f"{config.activate_api_url}{path}"
     headers = {"Authorization": f"Bearer {config.activate_api_key}"}
     logger.debug("GET %s (params: %s)", url, params)
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.HTTPError as e:
-        logger.error(
-            "API request failed: GET %s -> %d %s",
-            url,
-            e.response.status_code,
-            e.response.text[:500],
-        )
-        raise
-    except requests.exceptions.ConnectionError:
-        logger.error("Cannot connect to ACTIVATE API at %s", config.activate_api_url)
-        raise
+
+    retries = 3
+    retry_delay = 10  # seconds between retries
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(
+                "API request failed: GET %s -> %d %s",
+                url,
+                e.response.status_code,
+                e.response.text[:500],
+            )
+            raise  # HTTP errors are not transient, don't retry
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < retries:
+                logger.warning(
+                    "Network error on attempt %d/%d, retrying in %ds: %s",
+                    attempt, retries, retry_delay, e,
+                )
+                time.sleep(retry_delay)
+            else:
+                logger.error("Cannot connect to ACTIVATE API at %s after %d attempts", config.activate_api_url, retries)
+                raise
 
 
 def activate_list_groups(config: Config) -> list[dict]:
