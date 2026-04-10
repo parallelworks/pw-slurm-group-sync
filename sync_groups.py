@@ -216,7 +216,7 @@ def activate_get_group_members(config: Config, group_id: str) -> list[str]:
         f"/api/v2/organization/teams/{group_id}",
         params={"organization": config.activate_org_id},
     )
-    return [m["username"] for m in data.get("members", [])]
+    return [m["username"].lower() for m in data.get("members", [])]
 
 
 def fetch_activate_state(config: Config) -> list[ActivateGroup]:
