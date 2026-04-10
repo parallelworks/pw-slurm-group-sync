@@ -137,6 +137,7 @@ class SyncPlan:
     associations_to_remove: list[tuple[str, str]] = field(default_factory=list)  # (user, acct)
     defaults_to_update: list[tuple[str, str]] = field(default_factory=list)    # (user, new_default)
     allocations_to_set: list[tuple[str, int]] = field(default_factory=list)    # (account, allocation_value)
+    new_users: list[str] = field(default_factory=list)                        # users with no prior associations
 
     def is_empty(self) -> bool:
         return not any([
@@ -377,6 +378,17 @@ def slurm_add_user(config: Config, username: str, account: str, default_account:
     run_sacctmgr(cmd, config)
 
 
+def slurm_set_user_qos(config: Config, username: str) -> None:
+    """Assign normal QoS to a newly created user."""
+    logger.info("Setting QoS for new user: %s (qos+=normal, defaultqos+=normal)", username)
+    run_sacctmgr(
+        ["-i", "modify", "user",
+         "where", f"user={username}",
+         "set", "qos+=normal", "defaultqos+=normal"],
+        config,
+    )
+
+
 def slurm_remove_user_association(config: Config, username: str, account: str) -> None:
     logger.info("Removing user association: %s -> %s", username, account)
     result = run_sacctmgr(
@@ -494,6 +506,8 @@ def compute_sync_plan(
 
         # Associations to add
         to_add = sorted(desired_accts - current_accts)
+        if to_add and not current_accts:
+            plan.new_users.append(username)
         for acct in to_add:
             # Set DefaultAccount when adding a brand-new user (no existing associations)
             default = desired_defaults.get(username) if not current_accts and acct == to_add[0] else None
@@ -553,6 +567,11 @@ def log_sync_plan(plan: SyncPlan) -> None:
         for user, new_default in plan.defaults_to_update:
             logger.info("    ~ %s -> DefaultAccount=%s", user, new_default)
 
+    if plan.new_users:
+        logger.info("  QoS to assign (%d new users):", len(plan.new_users))
+        for user in plan.new_users:
+            logger.info("    ~ %s -> qos+=normal, defaultqos+=normal", user)
+
     if plan.allocations_to_set:
         logger.info("  Allocations to set (%d):", len(plan.allocations_to_set))
         for account, value in plan.allocations_to_set:
@@ -576,6 +595,13 @@ def execute_sync_plan(plan: SyncPlan, config: Config) -> int:
     for username, account, default in plan.associations_to_add:
         try:
             slurm_add_user(config, username, account, default)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            errors += 1
+
+    # Phase 2b: Set QoS for brand-new users
+    for username in plan.new_users:
+        try:
+            slurm_set_user_qos(config, username)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             errors += 1
 
