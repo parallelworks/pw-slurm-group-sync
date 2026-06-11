@@ -22,6 +22,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
@@ -210,14 +211,13 @@ def activate_list_groups(config: Config) -> list[dict]:
     return _api_get(config, f"/api/organizations/{config.activate_org_name}/groups")
 
 
-def activate_get_group_members(config: Config, group_id: str) -> list[str]:
+def activate_get_group_members(config: Config, group_name: str) -> list[str]:
     """Fetch member usernames for a single group."""
     data = _api_get(
         config,
-        f"/api/v2/organization/teams/{group_id}",
-        params={"organization": config.activate_org_id},
+        f"/api/organizations/{config.activate_org_name}/groups/{quote(group_name, safe='')}/members",
     )
-    return [m["username"].lower() for m in data.get("members", [])]
+    return [m["username"].lower() for m in data]
 
 
 def fetch_activate_state(config: Config) -> list[ActivateGroup]:
@@ -242,7 +242,7 @@ def fetch_activate_state(config: Config) -> list[ActivateGroup]:
 
     groups = []
     for g in raw_groups:
-        members = activate_get_group_members(config, g["id"])
+        members = activate_get_group_members(config, g["name"])
         account_name = normalize_account_name(g["name"])
         allocation = g.get("allocations", {}).get("total", None)
         logger.debug("Group %s (%s): %d members, allocation=%s", g["name"], account_name, len(members), allocation)
