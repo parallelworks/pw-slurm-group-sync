@@ -129,6 +129,31 @@ To rotate logs, add a logrotate config at `/etc/logrotate.d/pw-groups`:
 }
 ```
 
+## Running as a container
+
+CI publishes `ghcr.io/parallelworks/pw-slurm-group-sync` on every merge to
+`main`. The image bundles `sacctmgr` and munge from the CoreWeave Slurm
+controller image, so it can run as a Kubernetes CronJob next to a SUNK
+cluster. The entrypoint expects:
+
+- The cluster's munge key mounted at `/mnt/munge/munge.key` (override with
+  `MUNGE_KEY_SOURCE`)
+- `slurm.conf` mounted at `/etc/slurm`
+- Configuration passed as environment variables instead of `.env`
+
+It starts a private `munged`, verifies the socket, and runs one sync, so
+schedule it with `concurrencyPolicy: Forbid`. Run as root: slurmdbd treats
+uid 0 as an implicit admin, no Slurm user provisioning needed.
+
+Local test (fails on missing env after the munge chain comes up, proving the
+plumbing works):
+
+```bash
+docker build -t pw-slurm-group-sync:dev .
+head -c 1024 /dev/urandom > /tmp/munge.key
+docker run --rm -v /tmp/munge.key:/mnt/munge/munge.key:ro pw-slurm-group-sync:dev
+```
+
 ## Configuration reference
 
 All configuration is via `.env` file or environment variables. See [env.example](env.example) for a documented template.
