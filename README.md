@@ -131,22 +131,34 @@ To rotate logs, add a logrotate config at `/etc/logrotate.d/pw-groups`:
 
 ## Running as a container
 
-CI publishes `ghcr.io/parallelworks/pw-slurm-group-sync` on every merge to
-`main`. The image bundles `sacctmgr` and munge from the CoreWeave Slurm
-controller image, so it can run as a Kubernetes CronJob next to a SUNK
-cluster. The entrypoint expects:
+An alternative to the host cron setup above, for deployments where a
+container is easier to schedule (a Kubernetes CronJob next to a SUNK
+cluster, Docker on a head node, and so on). The host cron setup remains
+fully supported. CI publishes `ghcr.io/parallelworks/pw-slurm-group-sync`
+on every merge to `main`.
 
-- The cluster's munge key mounted at `/mnt/munge/munge.key` (override with
-  `MUNGE_KEY_SOURCE`)
-- `slurm.conf` mounted at `/etc/slurm`
-- Configuration passed as environment variables instead of `.env`
+Configuration works the same as on a host: environment variables, or a
+`.env` mounted at `/opt/pw-slurm-group-sync/.env`.
 
-It starts a private `munged`, verifies the socket, and runs one sync, so
-schedule it with `concurrencyPolicy: Forbid`. Run as root: slurmdbd treats
-uid 0 as an implicit admin, no Slurm user provisioning needed.
+The image needs three things from the target cluster:
 
-Local test (fails on missing env after the munge chain comes up, proving the
-plumbing works):
+- **slurm.conf** mounted at `/etc/slurm`.
+- **Munge**, one of two ways: mount an existing munge socket directory at
+  `/run/munge` (for example `-v /run/munge:/run/munge` on a host already
+  running munged), or mount the cluster's munge key at
+  `/mnt/munge/munge.key` (override with `MUNGE_KEY_SOURCE`) and the
+  entrypoint starts a private `munged`.
+- **A version-compatible slurmdbd.** The bundled `sacctmgr` is Slurm
+  25.05.x; slurmdbd accepts clients up to two major releases older, so pick
+  a base image tag near your cluster's version if it differs.
+
+The entrypoint verifies munge, runs one sync, and exits — schedule it with
+something that prevents overlap (for Kubernetes, `concurrencyPolicy:
+Forbid`). Run it as root or as a Slurm admin uid: slurmdbd treats uid 0 as
+an implicit admin.
+
+Local smoke test (fails on missing env after the munge chain comes up,
+proving the plumbing works):
 
 ```bash
 docker build -t pw-slurm-group-sync:dev .
