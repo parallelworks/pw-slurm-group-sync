@@ -4,19 +4,26 @@ Syncs groups and their members from the ACTIVATE computing control plane to Slur
 
 ## What it does
 
-1. Fetches groups and member lists from the ACTIVATE API
+1. Reads groups and member lists from the ACTIVATE API, or from the local nsscache group cache on hosts that already run nsscache against ACTIVATE
 2. Reads the current Slurm accounting state via `sacctmgr`
 3. Computes the diff (accounts/associations to add, remove, or update)
 4. Applies changes in the correct dependency order
 
-Each ACTIVATE group becomes a Slurm account. Group members become user associations under that account. Users in multiple groups get associations in all of them, with their `DefaultAccount` set to the first group alphabetically.
+Each ACTIVATE group becomes a Slurm account. Group members become user associations under that account. Users in multiple groups get associations in all of them, with their `DefaultAccount` set to the earliest-created group.
+
+## Group sources
+
+- `GROUPS_SOURCE=api` (default): fetches groups from the ACTIVATE API using the `parallelworks-client` SDK. Only `ACTIVATE_API_KEY` is required; the API URL is embedded in the key and the organization comes from the whoami endpoint.
+- `GROUPS_SOURCE=nsscache`: reads the group cache file nsscache already maintains on the host (default `/etc/group.cache`). No API access or key needed, and Slurm accounts derive from the same data POSIX identity uses. Requires `SLURM_ACCOUNT_ORG`. Not supported with `SYNC_ALLOCATIONS` (allocation values only exist in the API); DefaultAccount ordering uses gid order, which matches creation order.
+
+In both modes, `SLURM_CLUSTER` defaults to the sole cluster registered in slurmdbd (api mode falls back to the org name first, matching earlier releases).
 
 ## Prerequisites
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - `sacctmgr` available on `$PATH` (run on the Slurm head node or a host with sacctmgr access)
-- ACTIVATE API key with org read permissions
+- An ACTIVATE API key with org read permissions (`api` mode), or an nsscache group cache on the host (`nsscache` mode)
 
 ## Setup
 
@@ -25,7 +32,8 @@ Each ACTIVATE group becomes a Slurm account. Group members become user associati
 2. Copy the example environment file and fill in your values:
    ```bash
    cp env.example .env
-   # Edit .env with your ACTIVATE_API_KEY, ACTIVATE_ORG_ID, ACTIVATE_ORG_NAME
+   # api mode: set ACTIVATE_API_KEY (everything else is derived from it)
+   # nsscache mode: set GROUPS_SOURCE=nsscache and SLURM_ACCOUNT_ORG
    ```
 
 3. Install dependencies:
@@ -172,12 +180,13 @@ All configuration is via `.env` file or environment variables. See [env.example]
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ACTIVATE_API_KEY` | Yes | — | ACTIVATE API bearer token |
-| `ACTIVATE_ORG_ID` | Yes | — | Organization ID |
-| `ACTIVATE_ORG_NAME` | Yes | — | Organization slug |
-| `ACTIVATE_API_URL` | No | `https://activate.parallel.works` | API base URL |
-| `SLURM_CLUSTER` | No | `ACTIVATE_ORG_NAME` | Slurm ClusterName |
-| `SLURM_ACCOUNT_ORG` | No | `ACTIVATE_ORG_NAME` | Organization field on Slurm accounts |
+| `GROUPS_SOURCE` | No | `api` | `api` or `nsscache` |
+| `ACTIVATE_API_KEY` | api mode | — | ACTIVATE API key |
+| `NSSCACHE_GROUP_FILE` | No | `/etc/group.cache` | Group cache path (nsscache mode) |
+| `ACTIVATE_ORG_NAME` | No | derived from API key | Organization slug |
+| `ACTIVATE_API_URL` | No | derived from API key | API base URL |
+| `SLURM_CLUSTER` | No | org name, else sole slurmdbd cluster | Slurm ClusterName |
+| `SLURM_ACCOUNT_ORG` | nsscache mode | `ACTIVATE_ORG_NAME` | Organization field on Slurm accounts |
 | `SYNC_GROUPS` | No | (all) | Comma-separated group names to sync |
 | `SYNC_ALLOCATIONS` | No | `false` | Sync ACTIVATE allocations to Slurm `GrpTRES` |
 | `SLURM_ALLOCATION_TRES` | No | `gres/gpu` | TRES type for allocation limits |
@@ -198,7 +207,7 @@ The script only manages Slurm accounts whose `Organization` field matches `SLURM
 
 ## Troubleshooting
 
-**`Missing required environment variables`** — Ensure `ACTIVATE_API_KEY`, `ACTIVATE_ORG_ID`, and `ACTIVATE_ORG_NAME` are set in `.env`.
+**`Missing required environment variables`** — Ensure `ACTIVATE_API_KEY` is set in `.env` (api mode), or `SLURM_ACCOUNT_ORG` (nsscache mode).
 
 **`API request failed: GET ... -> 401`** — API key is invalid or expired. Generate a new one in ACTIVATE under Account > Authentication > API Keys.
 
