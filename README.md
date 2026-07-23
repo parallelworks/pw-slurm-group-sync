@@ -129,6 +129,43 @@ To rotate logs, add a logrotate config at `/etc/logrotate.d/pw-groups`:
 }
 ```
 
+## Running as a container
+
+An alternative to the host cron setup above, for deployments where a
+container is easier to schedule (a Kubernetes CronJob next to a SUNK
+cluster, Docker on a head node, and so on). The host cron setup remains
+fully supported. CI publishes `ghcr.io/parallelworks/pw-slurm-group-sync`
+on every GitHub release, tagged with the release version.
+
+Configuration works the same as on a host: environment variables, or a
+`.env` mounted at `/opt/pw-slurm-group-sync/.env`.
+
+The image needs three things from the target cluster:
+
+- **slurm.conf** mounted at `/etc/slurm`.
+- **Munge**, one of two ways: mount an existing munge socket directory at
+  `/run/munge` (for example `-v /run/munge:/run/munge` on a host already
+  running munged), or mount the cluster's munge key at
+  `/mnt/munge/munge.key` (override with `MUNGE_KEY_SOURCE`) and the
+  entrypoint starts a private `munged`.
+- **A version-compatible slurmdbd.** The bundled `sacctmgr` is Slurm
+  25.05.x; slurmdbd accepts clients up to two major releases older, so pick
+  a base image tag near your cluster's version if it differs.
+
+The entrypoint verifies munge, runs one sync, and exits — schedule it with
+something that prevents overlap (for Kubernetes, `concurrencyPolicy:
+Forbid`). Run it as root or as a Slurm admin uid: slurmdbd treats uid 0 as
+an implicit admin.
+
+Local smoke test (fails on missing env after the munge chain comes up,
+proving the plumbing works):
+
+```bash
+docker build -t pw-slurm-group-sync:dev .
+head -c 1024 /dev/urandom > /tmp/munge.key
+docker run --rm -v /tmp/munge.key:/mnt/munge/munge.key:ro pw-slurm-group-sync:dev
+```
+
 ## Configuration reference
 
 All configuration is via `.env` file or environment variables. See [env.example](env.example) for a documented template.
