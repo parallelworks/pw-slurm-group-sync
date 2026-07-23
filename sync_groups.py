@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Sync ACTIVATE platform groups to Slurm accounts and associations.
 
-Fetches group membership from the ACTIVATE API and ensures corresponding
-Slurm accounts and user associations exist. Supports dry-run mode and
-group filtering for incremental rollout.
+Reads group membership from the ACTIVATE API or from a local nsscache
+group cache file and ensures corresponding Slurm accounts and user
+associations exist. Supports dry-run mode and group filtering for
+incremental rollout.
 
 Usage:
     uv run sync_groups.py
@@ -20,17 +21,18 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import quote
 
-import requests
+import httpx
 from dotenv import load_dotenv
+from parallelworks_client import Client, CredentialError, SyncClient, extract_platform_host
 
 # Load .env from the script's directory
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 logger = logging.getLogger("sync_groups")
 
@@ -41,9 +43,10 @@ logger = logging.getLogger("sync_groups")
 
 @dataclass(frozen=True)
 class Config:
+    groups_source: str
+    nsscache_group_file: str
     activate_api_url: str
     activate_api_key: str
-    activate_org_id: str
     activate_org_name: str
     slurm_cluster: str
     slurm_account_org: str
@@ -56,33 +59,55 @@ class Config:
 
 
 def load_config() -> Config:
-    """Load and validate configuration from environment variables."""
+    """Load and validate configuration from environment variables.
+
+    In api mode, only ACTIVATE_API_KEY is required: the API URL is embedded
+    in the key, the org name comes from the whoami endpoint, and the Slurm
+    settings default from the org name. In nsscache mode, SLURM_ACCOUNT_ORG
+    is required (unless ACTIVATE_ORG_NAME provides a fallback) and the
+    cluster is read from slurmdbd when unset.
+    """
+    groups_source = os.environ.get("GROUPS_SOURCE", "api").strip().lower()
+    if groups_source not in ("api", "nsscache"):
+        raise SystemExit(f"Invalid GROUPS_SOURCE '{groups_source}' (expected 'api' or 'nsscache')")
+
     api_key = os.environ.get("ACTIVATE_API_KEY", "")
-    org_id = os.environ.get("ACTIVATE_ORG_ID", "")
     org_name = os.environ.get("ACTIVATE_ORG_NAME", "")
 
     missing = []
-    if not api_key:
-        missing.append("ACTIVATE_API_KEY")
-    if not org_id:
-        missing.append("ACTIVATE_ORG_ID")
-    if not org_name:
-        missing.append("ACTIVATE_ORG_NAME")
+    if groups_source == "api":
+        if not api_key:
+            missing.append("ACTIVATE_API_KEY")
+    else:
+        if not os.environ.get("SLURM_ACCOUNT_ORG") and not org_name:
+            missing.append("SLURM_ACCOUNT_ORG")
     if missing:
         raise SystemExit(f"Missing required environment variables: {', '.join(missing)}")
+
+    sync_allocations = os.environ.get("SYNC_ALLOCATIONS", "false").lower() in ("true", "1", "yes")
+    if groups_source == "nsscache" and sync_allocations:
+        raise SystemExit("SYNC_ALLOCATIONS requires GROUPS_SOURCE=api (allocation data is not in the group cache)")
+
+    api_url = os.environ.get("ACTIVATE_API_URL", "").rstrip("/")
+    if not api_url and api_key:
+        try:
+            api_url = f"https://{extract_platform_host(api_key)}"
+        except CredentialError:
+            api_url = "https://activate.parallel.works"
 
     sync_groups_raw = os.environ.get("SYNC_GROUPS", "").strip()
     sync_groups = [g.strip() for g in sync_groups_raw.split(",") if g.strip()] if sync_groups_raw else []
 
     return Config(
-        activate_api_url=os.environ.get("ACTIVATE_API_URL", "https://activate.parallel.works").rstrip("/"),
+        groups_source=groups_source,
+        nsscache_group_file=os.environ.get("NSSCACHE_GROUP_FILE", "/etc/group.cache"),
+        activate_api_url=api_url,
         activate_api_key=api_key,
-        activate_org_id=org_id,
         activate_org_name=org_name,
         slurm_cluster=os.environ.get("SLURM_CLUSTER", org_name),
         slurm_account_org=os.environ.get("SLURM_ACCOUNT_ORG", org_name),
         sync_groups=sync_groups,
-        sync_allocations=os.environ.get("SYNC_ALLOCATIONS", "false").lower() in ("true", "1", "yes"),
+        sync_allocations=sync_allocations,
         slurm_allocation_tres=os.environ.get("SLURM_ALLOCATION_TRES", "gres/gpu"),
         dry_run=os.environ.get("DRY_RUN", "false").lower() in ("true", "1", "yes"),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -107,12 +132,11 @@ def setup_logging(level: str) -> None:
 
 @dataclass(frozen=True)
 class ActivateGroup:
-    id: str
     name: str
     description: str
     members: list[str]  # usernames
     allocation: int | None  # from allocations.total, e.g. GPU count
-    created_at: str  # ISO timestamp from API, used for DefaultAccount ordering
+    created_at: str  # sortable creation marker, used for DefaultAccount ordering
 
 
 @dataclass(frozen=True)
@@ -169,32 +193,28 @@ def normalize_account_name(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ACTIVATE API client
+# ACTIVATE API client (parallelworks-client SDK)
 # ---------------------------------------------------------------------------
 
-def _api_get(config: Config, path: str, params: dict | None = None) -> dict | list:
-    """Shared GET helper with auth. Retries on transient network errors."""
-    url = f"{config.activate_api_url}{path}"
-    headers = {"Authorization": f"Bearer {config.activate_api_key}"}
-    logger.debug("GET %s (params: %s)", url, params)
-
+def _api_get(client: SyncClient, path: str) -> dict | list | str:
+    """GET via the SDK client. Retries on transient network errors."""
     retries = 3
     retry_delay = 10  # seconds between retries
 
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp = client.get(path)
             resp.raise_for_status()
             return resp.json()
-        except requests.exceptions.HTTPError as e:
+        except httpx.HTTPStatusError as e:
             logger.error(
                 "API request failed: GET %s -> %d %s",
-                url,
+                path,
                 e.response.status_code,
                 e.response.text[:500],
             )
             raise  # HTTP errors are not transient, don't retry
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        except httpx.TransportError as e:
             if attempt < retries:
                 logger.warning(
                     "Network error on attempt %d/%d, retrying in %ds: %s",
@@ -202,57 +222,111 @@ def _api_get(config: Config, path: str, params: dict | None = None) -> dict | li
                 )
                 time.sleep(retry_delay)
             else:
-                logger.error("Cannot connect to ACTIVATE API at %s after %d attempts", config.activate_api_url, retries)
+                logger.error("Cannot reach the ACTIVATE API after %d attempts", retries)
                 raise
 
 
-def activate_list_groups(config: Config) -> list[dict]:
-    """Fetch all groups for the organization."""
-    return _api_get(config, f"/api/organizations/{config.activate_org_name}/groups")
+def resolve_api_defaults(config: Config, client: SyncClient) -> Config:
+    """Fill org-derived settings that were not set explicitly."""
+    if not config.activate_org_name:
+        org_name = _api_get(client, "/api/auth/whoami/organization")
+        logger.info("Resolved organization from API key: %s", org_name)
+        config = replace(config, activate_org_name=org_name)
+    if not config.slurm_cluster:
+        config = replace(config, slurm_cluster=config.activate_org_name)
+    if not config.slurm_account_org:
+        config = replace(config, slurm_account_org=config.activate_org_name)
+    return config
 
 
-def activate_get_group_members(config: Config, group_name: str) -> list[str]:
-    """Fetch member usernames for a single group."""
-    data = _api_get(
-        config,
-        f"/api/organizations/{config.activate_org_name}/groups/{quote(group_name, safe='')}/members",
+def apply_group_filter(raw_groups: list[dict], config: Config, source: str) -> list[dict]:
+    """Filter raw groups (dicts with a 'name' key) down to SYNC_GROUPS if set."""
+    if not config.sync_groups:
+        return raw_groups
+    filtered = [g for g in raw_groups if g["name"] in config.sync_groups]
+    logger.info(
+        "Filtered to %d groups matching SYNC_GROUPS: %s",
+        len(filtered),
+        ", ".join(config.sync_groups),
     )
-    return [m["username"].lower() for m in data]
+    found_names = {g["name"] for g in filtered}
+    for name in config.sync_groups:
+        if name not in found_names:
+            logger.warning("SYNC_GROUPS filter includes '%s' but no such group found in %s", name, source)
+    return filtered
 
 
-def fetch_activate_state(config: Config) -> list[ActivateGroup]:
+def fetch_activate_state(config: Config, client: SyncClient) -> list[ActivateGroup]:
     """Fetch all groups and their members from ACTIVATE."""
     logger.info("Fetching ACTIVATE groups for org %s...", config.activate_org_name)
-    raw_groups = activate_list_groups(config)
+    raw_groups = _api_get(client, f"/api/organizations/{config.activate_org_name}/groups")
     logger.info("Found %d groups in ACTIVATE", len(raw_groups))
 
-    # Apply group filter if set
-    if config.sync_groups:
-        raw_groups = [g for g in raw_groups if g["name"] in config.sync_groups]
-        logger.info(
-            "Filtered to %d groups matching SYNC_GROUPS: %s",
-            len(raw_groups),
-            ", ".join(config.sync_groups),
-        )
-        # Warn about groups in filter that don't exist
-        found_names = {g["name"] for g in raw_groups}
-        for name in config.sync_groups:
-            if name not in found_names:
-                logger.warning("SYNC_GROUPS filter includes '%s' but no such group found in ACTIVATE", name)
+    raw_groups = apply_group_filter(raw_groups, config, "ACTIVATE")
 
     groups = []
     for g in raw_groups:
-        members = activate_get_group_members(config, g["name"])
+        data = _api_get(
+            client,
+            f"/api/organizations/{config.activate_org_name}/groups/{quote(g['name'], safe='')}/members",
+        )
+        members = sorted({m["username"].lower() for m in data})
         account_name = normalize_account_name(g["name"])
         allocation = g.get("allocations", {}).get("total", None)
         logger.debug("Group %s (%s): %d members, allocation=%s", g["name"], account_name, len(members), allocation)
         groups.append(ActivateGroup(
-            id=g["id"],
             name=account_name,
-            description=sanitize_description(g.get("description", g["name"])),
+            description=sanitize_description(g.get("description") or g["name"]),
             members=members,
             allocation=allocation,
             created_at=g.get("createdAt", ""),
+        ))
+
+    total_members = sum(len(g.members) for g in groups)
+    logger.info("Fetched %d groups with %d total member assignments", len(groups), total_members)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# nsscache source
+# ---------------------------------------------------------------------------
+
+def fetch_nsscache_state(config: Config) -> list[ActivateGroup]:
+    """Read groups and members from an nsscache group cache file.
+
+    The file uses standard group(5) format and contains only the groups
+    nsscache synced from the platform, so every entry is a sync candidate.
+    """
+    path = Path(config.nsscache_group_file)
+    logger.info("Reading groups from %s...", path)
+    raw_groups = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":")
+        if len(parts) < 4:
+            logger.warning("Skipping malformed group entry: %s", line[:80])
+            continue
+        members = sorted({m.strip().lower() for m in parts[3].split(",") if m.strip()})
+        raw_groups.append({"name": parts[0], "gid": parts[2], "members": members})
+    logger.info("Found %d groups in %s", len(raw_groups), path)
+
+    raw_groups = apply_group_filter(raw_groups, config, str(path))
+
+    groups = []
+    for g in raw_groups:
+        account_name = normalize_account_name(g["name"])
+        logger.debug("Group %s (%s): %d members", g["name"], account_name, len(g["members"]))
+        groups.append(ActivateGroup(
+            name=account_name,
+            description=sanitize_description(g["name"]),
+            members=g["members"],
+            allocation=None,
+            # gids are assigned in creation order, so zero-padding preserves
+            # the earliest-created-group-wins DefaultAccount semantics of the
+            # API's createdAt ordering
+            created_at=g["gid"].zfill(10),
         ))
 
     total_members = sum(len(g.members) for g in groups)
@@ -297,6 +371,18 @@ def run_sacctmgr(
     except subprocess.TimeoutExpired:
         logger.error("sacctmgr timed out after 30s: %s", " ".join(cmd))
         raise
+
+
+def resolve_slurm_cluster(config: Config) -> str:
+    """Read the cluster name from slurmdbd when exactly one is registered."""
+    result = run_sacctmgr(["list", "cluster", "-n", "-P", "format=Cluster"], config)
+    clusters = [line.split("|")[0] for line in result.stdout.strip().splitlines() if line.strip()]
+    if len(clusters) == 1:
+        logger.info("Resolved Slurm cluster from slurmdbd: %s", clusters[0])
+        return clusters[0]
+    raise SystemExit(
+        f"SLURM_CLUSTER is not set and slurmdbd has {len(clusters)} clusters; set SLURM_CLUSTER explicitly"
+    )
 
 
 def slurm_list_accounts(config: Config) -> list[SlurmAccount]:
@@ -645,7 +731,7 @@ def ping_heartbeat(config: Config) -> None:
     if not config.heartbeat_url:
         return
     try:
-        resp = requests.get(config.heartbeat_url, timeout=10)
+        resp = httpx.get(config.heartbeat_url, timeout=10)
         logger.debug("Heartbeat ping: %d", resp.status_code)
     except Exception:
         logger.warning("Failed to ping heartbeat URL (non-fatal)")
@@ -667,15 +753,23 @@ def main() -> None:
     if config.sync_groups:
         logger.info("Group filter active: %s", ", ".join(config.sync_groups))
 
-    # Fetch desired state from ACTIVATE
+    # Fetch desired state
     try:
-        groups = fetch_activate_state(config)
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        if config.groups_source == "nsscache":
+            groups = fetch_nsscache_state(config)
+        else:
+            with Client.with_api_key(config.activate_api_url, config.activate_api_key).sync() as client:
+                config = resolve_api_defaults(config, client)
+                groups = fetch_activate_state(config, client)
+    except httpx.TransportError:
         logger.error("Failed to fetch ACTIVATE state: network error (already retried), aborting")
         raise SystemExit(1)
     except Exception:
-        logger.exception("Failed to fetch ACTIVATE state: unexpected error, aborting")
+        logger.exception("Failed to fetch group state: unexpected error, aborting")
         raise SystemExit(1)
+
+    if not config.slurm_cluster:
+        config = replace(config, slurm_cluster=resolve_slurm_cluster(config))
 
     if not groups:
         logger.warning("No groups found (check SYNC_GROUPS filter). Nothing to do.")
