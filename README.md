@@ -135,7 +135,7 @@ An alternative to the host cron setup above, for deployments where a
 container is easier to schedule (a Kubernetes CronJob next to a SUNK
 cluster, Docker on a head node, and so on). The host cron setup remains
 fully supported. CI publishes `ghcr.io/parallelworks/pw-slurm-group-sync`
-on every merge to `main`.
+on every GitHub release, tagged with the release version.
 
 Configuration works the same as on a host: environment variables, or a
 `.env` mounted at `/opt/pw-slurm-group-sync/.env`.
